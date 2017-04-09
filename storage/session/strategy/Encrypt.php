@@ -10,6 +10,7 @@
 namespace lithium\storage\session\strategy;
 
 use lithium\core\ConfigException;
+use lithium\security\Random;
 
 /**
  * This strategy allows you to encrypt your `Session` and / or `Cookie` data so that it
@@ -53,6 +54,10 @@ use lithium\core\ConfigException;
  * want to use your own hashing algorithm, make sure it has the maximum key length of the algorithm
  * used. See the `Encrypt::_hashSecret()` method for more information on this.
  *
+ * @link http://thefsb.tumblr.com/post/110749271235/using-opensslendecrypt-in-php-instead-of
+ * @link https://paragonie.com/blog/2015/05/if-you-re-typing-word-mcrypt-into-your-code-you-re-doing-it-wrong
+ *
+ *
  * @link http://php.net/book.mcrypt.php The mcrypt extension.
  * @link http://php.net/mcrypt.ciphers.php List of supported ciphers.
  * @link http://php.net/mcrypt.constants.php List of supported modes.
@@ -62,19 +67,14 @@ class Encrypt extends \lithium\core\Object {
 	/**
 	 * Holds the initialization vector.
 	 */
-	protected static $_vector = null;
-
-	/**
-	 * Holds the crypto resource after initialization.
-	 */
-	protected static $_resource = null;
+	protected $_vector = null;
 
 	/**
 	 * Default configuration.
 	 */
 	protected $_defaults = [
-		'cipher' => MCRYPT_RIJNDAEL_128,
-		'mode' => MCRYPT_MODE_CBC
+		'cipher' => OPENSSL_CIPHER_AES_256_CBC,
+		'secret' => null,
 	];
 
 	/**
@@ -91,21 +91,6 @@ class Encrypt extends \lithium\core\Object {
 			throw new ConfigException('Encrypt strategy requires a secret key.');
 		}
 		parent::__construct($config + $this->_defaults);
-
-		$cipher = $this->_config['cipher'];
-		$mode = $this->_config['mode'];
-
-		static::$_resource = mcrypt_module_open($cipher, '', $mode, '');
-		$this->_config['vector'] = static::_vector();
-	}
-
-	/**
-	 * Destructor. Closes the crypto resource when it is no longer needed.
-	 *
-	 * @return void
-	 */
-	public function __destruct() {
-		mcrypt_module_close(static::$_resource);
 	}
 
 	/**
@@ -179,13 +164,16 @@ class Encrypt extends \lithium\core\Object {
 	 * @return string A Base64 encoded and encrypted string.
 	 */
 	protected function _encrypt($decrypted = []) {
-		$vector = $this->_config['vector'];
+		$vector = $this->_vector();
 		$secret = $this->_hashSecret($this->_config['secret']);
 
-		mcrypt_generic_init(static::$_resource, $secret, $vector);
-		$encrypted = mcrypt_generic(static::$_resource, serialize($decrypted));
-		mcrypt_generic_deinit(static::$_resource);
-
+		$encrypted = openssl_encrypt(
+			serialize($decrypted),
+			$this->_config['cipher'],
+			$secret,
+			OPENSSL_RAW_DATA,
+			$vector
+		);
 		return base64_encode($encrypted) . base64_encode($vector);
 	}
 
@@ -198,24 +186,27 @@ class Encrypt extends \lithium\core\Object {
 	protected function _decrypt($encrypted) {
 		$secret = $this->_hashSecret($this->_config['secret']);
 
-		$vectorSize = strlen(base64_encode(str_repeat(" ", static::_vectorSize())));
+		$vectorSize = strlen(base64_encode(str_repeat(' ', $this->_vectorSize())));
 		$vector = base64_decode(substr($encrypted, -$vectorSize));
 		$data = base64_decode(substr($encrypted, 0, -$vectorSize));
 
-		mcrypt_generic_init(static::$_resource, $secret, $vector);
-		$decrypted = mdecrypt_generic(static::$_resource, $data);
-		mcrypt_generic_deinit(static::$_resource);
-
+		$decrypted = openssl_decrypt(
+			$data,
+			$this->_config['cipher'],
+			$secret,
+			OPENSSL_RAW_DATA,
+			$vector
+		);
 		return unserialize(trim($decrypted));
 	}
 
 	/**
-	 * Determines if the Mcrypt extension has been installed.
+	 * Determines if the OpenSSL extension has been installed.
 	 *
 	 * @return boolean `true` if enabled, `false` otherwise.
 	 */
 	public static function enabled() {
-		return extension_loaded('mcrypt');
+		return extension_loaded('openssl');
 	}
 
 	/**
@@ -245,27 +236,23 @@ class Encrypt extends \lithium\core\Object {
 	}
 
 	/**
-	 * Generates an initialization vector.
+	 * Generates an initialization vector if needed.
 	 *
 	 * @return string Returns an initialization vector.
 	 * @link http://php.net/function.mcrypt-create-iv.php
 	 */
-	protected static function _vector() {
-		if (static::$_vector) {
-			return static::$_vector;
-		}
-
-		return static::$_vector = mcrypt_create_iv(static::_vectorSize(), MCRYPT_DEV_URANDOM);
+	protected function _vector() {
+		return $this->_vector ?: ($this->_vector = Random::generate($this->_vectorSize()));
 	}
 
 	/**
 	 * Returns the vector size vor a given cipher and mode.
 	 *
 	 * @return number The vector size.
-	 * @link http://php.net/function.mcrypt-enc-get-iv-size.php
+	 * @link http://php.net/openssl_cipher_iv_length
 	 */
-	protected static function _vectorSize() {
-		return mcrypt_enc_get_iv_size(static::$_resource);
+	protected function _vectorSize() {
+		return openssl_cipher_iv_length($this->_config['cipher']);
 	}
 }
 
